@@ -28,7 +28,26 @@ const (
 	StopToolLoop                        // 思考暂停，转入工具执行
 	StopMaxIterations                   // 达到最大思考轮数
 	StopError                           // 出错终止
+	StopSuspended                       // 工具需要外部输入，循环挂起等待
 )
+
+// String 返回 StopReason 的可读名称。
+func (r StopReason) String() string {
+	switch r {
+	case StopFinished:
+		return "finished"
+	case StopToolLoop:
+		return "tool_loop"
+	case StopMaxIterations:
+		return "max_iterations"
+	case StopError:
+		return "error"
+	case StopSuspended:
+		return "suspended"
+	default:
+		return "unknown"
+	}
+}
 
 // Callbacks 流式事件回调（ChatStream 使用）
 type Callbacks struct {

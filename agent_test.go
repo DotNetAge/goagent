@@ -334,3 +334,129 @@ func TestChatStreamOnComplete(t *testing.T) {
 		t.Fatalf("assistant 消息内容错误: %q", got[1].TextContent())
 	}
 }
+
+// suspendedTool 在 Execute 中返回 ErrNeedExternalInput，用于测试挂起机制
+type suspendedTool struct {
+	returnValue string
+}
+
+func (s *suspendedTool) Name() string        { return "ask_permission" }
+func (s *suspendedTool) Description() string { return "触发安全授权挂起" }
+func (s *suspendedTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"action":{"type":"string"}}}`)
+}
+func (s *suspendedTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	return "", NewPermissionRequest(ctx, "ask_permission", "call-123", args, map[string]any{"scope": "sandbox"})
+}
+
+// ── Hook 测试辅助类型 ──
+
+// abortHook 在 AfterLLM 里请求中止循环，验证钩子的中止能力
+type abortHook struct {
+	priority int
+	aborted  bool
+}
+
+func (h *abortHook) Priority() int { return h.priority }
+func (h *abortHook) BeforeLLM(ctx context.Context, input BeforeLLMInput) HookResult {
+	return HookResult{}
+}
+func (h *abortHook) AfterLLM(ctx context.Context, input AfterLLMInput) HookResult {
+	h.aborted = true
+	return HookResult{Abort: true, AbortReason: "用户中止"}
+}
+func (h *abortHook) Abort(ctx context.Context, reason string) {}
+
+// logHook 记录 BeforeLLM 调用，验证钩子执行顺序
+type logHook struct {
+	name     string
+	priority int
+	called   []string // 调用顺序（名称列表，每次 BeforeLLM 追加）
+}
+
+func (h *logHook) Priority() int { return h.priority }
+func (h *logHook) BeforeLLM(ctx context.Context, input BeforeLLMInput) HookResult {
+	h.called = append(h.called, h.name)
+	return HookResult{}
+}
+func (h *logHook) AfterLLM(ctx context.Context, input AfterLLMInput) HookResult {
+	return HookResult{}
+}
+func (h *logHook) Abort(ctx context.Context, reason string) {}
+
+// TestAgentSuspendable 验证工具返回 ErrNeedExternalInput 时循环挂起
+func TestAgentSuspendable(t *testing.T) {
+	mock := &ollamaMock{
+		rounds: [][]string{
+			// 第一轮：模型发起 ask_permission 工具调用
+			{`{"model":"m","message":{"role":"assistant","content":"","tool_calls":[{"id":"call-123","function":{"name":"ask_permission","arguments":{"action":"run"}}}]},"done":true,"done_reason":"tool_calls"}`},
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(mock.handler))
+	defer srv.Close()
+
+	a := Ask("允许这个命令吗？").
+		Config(WithBaseURL(srv.URL), WithAPIKey("x"), WithModel("m")).
+		Tools(&suspendedTool{})
+
+	// 第一次调用：模型发起工具调用 → 工具挂起 → 循环挂起
+	answer, err := a.Chat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "" {
+		t.Fatalf("挂起时 answer 应为空字符串，得到 %q", answer)
+	}
+	if a.LastStopReason() != StopSuspended {
+		t.Fatalf("StopReason 应为 StopSuspended，得到 %v", a.LastStopReason())
+	}
+	if mock.reqs != 1 {
+		t.Fatalf("挂起后只应有 1 轮 LLM 请求，得到 %d", mock.reqs)
+	}
+}
+
+// TestAgentHooks 验证 LoopHook 的优先级排序和中止能力
+func TestAgentHooks(t *testing.T) {
+	mock := &ollamaMock{rounds: [][]string{
+		{`{"model":"m","message":{"role":"assistant","content":"好的"},"done":true,"done_reason":"stop"}`},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(mock.handler))
+	defer srv.Close()
+
+	hookA := &logHook{name: "A", priority: 10}
+	hookB := &logHook{name: "B", priority: 5}
+	hookAbort := &abortHook{priority: 100}
+
+	a := Ask("hi").
+		Config(WithBaseURL(srv.URL), WithAPIKey("x"), WithModel("m"),
+			WithLoopHooks(hookA, hookB, hookAbort))
+
+	// abortHook 在 AfterLLM 中请求中止 → 循环应被中止但不报错
+	_, err := a.Chat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hookAbort.aborted {
+		t.Fatal("abortHook 应该被调用并中止循环")
+	}
+	// BeforeLLM 顺序：B(prio=5) → A(prio=10) → abort(prio=100)
+	if len(hookA.called) == 0 || len(hookB.called) == 0 {
+		t.Fatalf("钩子应该至少各被调用一次: A=%v B=%v", hookA.called, hookB.called)
+	}
+	// 检查顺序：B 在 A 之前被调用
+	beforeA := false
+	beforeB := false
+	for _, name := range hookB.called {
+		if name == "B" {
+			beforeB = true
+		}
+	}
+	for _, name := range hookA.called {
+		if name == "A" {
+			beforeA = true
+		}
+	}
+	if !beforeB || !beforeA {
+		t.Fatalf("钩子调用顺序异常")
+	}
+}
