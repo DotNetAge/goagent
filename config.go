@@ -30,7 +30,7 @@ func defaultConfig() Config {
 	return Config{
 		BaseURL:       envOr("GOAGENT_BASE_URL", DefaultBaseURL),
 		APIKey:        envOr("GOAGENT_API_KEY", DefaultAPIKey),
-		Model:         envOr("GO_AGENT_MODEL", DefaultModel),
+		Model:         envOr("GOAGENT_MODEL", DefaultModel),
 		Temperature:   0.7,
 		Timeout:       10 * time.Minute,
 		MaxIterations: 30,
