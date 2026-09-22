@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"goagent"
-	"goagent/tools"
+	"github.com/DotNetAge/goagent"
+	"github.com/DotNetAge/goagent/tools"
 )
 
 // 基础示例：多轮思考 + 工具执行

@@ -386,7 +386,7 @@ loop:
 				args = json.RawMessage(call.Arguments)
 			}
 
-			bus.Emit(Event{Type: EvToolExecStart, Data: &ToolExecStartData{Name: call.Name, Args: args}})
+			bus.Emit(Event{Type: EvToolExecStart, Data: &ToolExecStartData{Name: call.Name, ToolCallID: call.ID, Args: args}})
 			if cb != nil && cb.BeforeToolExec != nil && tool != nil {
 				cb.BeforeToolExec(tool, args)
 			}
@@ -412,11 +412,12 @@ loop:
 			duration := time.Since(start)
 
 			bus.Emit(Event{Type: EvToolExecEnd, Data: &ToolExecEndData{
-				Name:     call.Name,
-				Duration: duration,
-				Success:  success,
-				Result:   result,
-				Error:    execErr,
+				Name:       call.Name,
+				ToolCallID: call.ID,
+				Duration:   duration,
+				Success:    success,
+				Result:     result,
+				Error:      execErr,
 			}})
 			if cb != nil && cb.AfterToolExec != nil && tool != nil {
 				cb.AfterToolExec(tool, result, execErr)

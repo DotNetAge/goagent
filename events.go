@@ -60,6 +60,8 @@ type LoopEndData struct {
 type ToolExecStartData struct {
 	// Name 被执行的工具名称。
 	Name string
+	// ToolCallID 本次执行的 tool_call.id（供下游按调用配对；内核自动回填）。
+	ToolCallID string
 	// Args 模型生成的工具参数（json.RawMessage）。
 	Args json.RawMessage
 }
@@ -68,6 +70,8 @@ type ToolExecStartData struct {
 type ToolExecEndData struct {
 	// Name 被执行的工具名称。
 	Name string
+	// ToolCallID 本次执行的 tool_call.id（与 EvToolExecStart 配对；内核自动回填）。
+	ToolCallID string
 	// Duration 工具执行耗时。
 	Duration time.Duration
 	// Success 是否执行成功。

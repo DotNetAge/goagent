@@ -31,8 +31,8 @@ type SubAgentRequest struct {
 type SubAgentReceipt struct {
 	// Accepted 是否受理。
 	Accepted bool
-	// SessionID 受理后的子会话 ID（跟踪句柄，CollectResults 据此收集）。
-	SessionID string
+	// TaskID 受理后的任务跟踪句柄（CollectResults 据此收集）。
+	TaskID string
 	// Reason 拒绝原因（Accepted=false 时）。
 	Reason string
 }
@@ -44,8 +44,6 @@ type SubAgentDispatcher interface {
 	// Submit 受理派发请求并同步返回回执。
 	// 受理过程失败（非策略性拒绝，如内部错误）时返回 error。
 	Submit(ctx context.Context, req SubAgentRequest) (SubAgentReceipt, error)
-	// Wait 等待指定子任务全部落定（Promise.all 语义），返回早期失败的 sessionID → 原因。
-	Wait(ctx context.Context, sessionIDs []string) map[string]error
 }
 
 // SubAgentToolName 是 SubAgent 工具的注册名（Harness 通用概念，对外保持稳定）。
@@ -104,5 +102,5 @@ func (t *SubAgentTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if !receipt.Accepted {
 		return fmt.Sprintf("派发被拒绝：%s", receipt.Reason), nil
 	}
-	return fmt.Sprintf("子任务已受理并开始运行。跟踪句柄：%s。请用收集工具等待该句柄的结果，不要重复派发。", receipt.SessionID), nil
+	return fmt.Sprintf("子任务已受理并开始运行。跟踪句柄：%s。请用收集工具等待该句柄的结果，不要重复派发。", receipt.TaskID), nil
 }

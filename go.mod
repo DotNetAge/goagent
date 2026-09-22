@@ -1,4 +1,4 @@
-module goagent
+module github.com/DotNetAge/goagent
 
 go 1.25
 

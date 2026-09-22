@@ -16,7 +16,7 @@ import (
 
 	"github.com/DotNetAge/gochat/core"
 
-	"goagent/tools"
+	"github.com/DotNetAge/goagent/tools"
 )
 
 // echoTool 测试用工具：回显参数

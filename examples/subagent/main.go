@@ -14,13 +14,14 @@ import (
 	"os"
 	"strings"
 
-	"goagent"
-	"goagent/subagent"
-	"goagent/tools"
+	"github.com/DotNetAge/goagent"
+	"github.com/DotNetAge/goagent/subagent"
+	"github.com/DotNetAge/goagent/tools"
 )
 
 // hostDispatcher 是宿主受理方的最小实现：
-// Submit 登记 + 构造子 Agent 并在后台运行；Wait 按跟踪句柄等待全部落定。
+// Submit 登记 + 构造子 Agent 并在后台运行，立即返回受理回执；
+// 结果由调用方经控制平面（DefaultRuntimeManager）按跟踪句柄主动读取。
 type hostDispatcher struct {
 	// agents 是本示例注册的 Agent 配置（模拟宿主的 Agent 配置库）。
 	agents map[string]func(task string) *goagent.Agent
@@ -57,28 +58,7 @@ func (h *hostDispatcher) Submit(ctx context.Context, req subagent.SubAgentReques
 		manager.Unregister(id)
 	}()
 
-	return subagent.SubAgentReceipt{Accepted: true, SessionID: id}, nil
-}
-
-func (h *hostDispatcher) Wait(ctx context.Context, sessionIDs []string) map[string]error {
-	manager := goagent.DefaultRuntimeManager()
-	failures := make(map[string]error)
-	for _, id := range sessionIDs {
-		rt, ok := manager.Get(id)
-		if !ok {
-			failures[id] = fmt.Errorf("实例不存在")
-			continue
-		}
-		select {
-		case <-rt.Done():
-			if st := rt.Status(); st != goagent.StatusCompleted {
-				failures[id] = fmt.Errorf("子任务异常终态: %v", st)
-			}
-		case <-ctx.Done():
-			return failures
-		}
-	}
-	return failures
+	return subagent.SubAgentReceipt{Accepted: true, TaskID: id}, nil
 }
 
 func main() {

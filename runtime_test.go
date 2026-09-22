@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"goagent/subagent"
+	"github.com/DotNetAge/goagent/subagent"
 
 	"github.com/DotNetAge/gochat/core"
 )
@@ -666,27 +666,7 @@ func (d *nestedStub) Submit(ctx context.Context, req subagent.SubAgentRequest) (
 		d.m.Unregister(id)
 	}()
 
-	return subagent.SubAgentReceipt{Accepted: true, SessionID: id}, nil
-}
-
-func (d *nestedStub) Wait(ctx context.Context, sessionIDs []string) map[string]error {
-	failures := make(map[string]error)
-	for _, id := range sessionIDs {
-		rt, ok := d.m.Get(id)
-		if !ok {
-			failures[id] = fmt.Errorf("实例不存在")
-			continue
-		}
-		select {
-		case <-rt.Done():
-			if st := rt.Status(); st != StatusCompleted {
-				failures[id] = fmt.Errorf("子任务异常终态: %v", st)
-			}
-		case <-ctx.Done():
-			return failures
-		}
-	}
-	return failures
+	return subagent.SubAgentReceipt{Accepted: true, TaskID: id}, nil
 }
 
 // waitNestedReceipts 轮询等待回执数量达标。
@@ -757,36 +737,5 @@ func TestSubAgentNestedDispatch(t *testing.T) {
 	}
 	if parentRT.Status() != StatusCompleted {
 		t.Fatalf("父实例应为 Completed，得到 %v", parentRT.Status())
-	}
-}
-
-// TestSubAgentNestedWait：等待原语按回执句柄收集全部子任务结果（Promise.all 语义）。
-func TestSubAgentNestedWait(t *testing.T) {
-	m := newRuntimeManager()
-	stub := newNestedStub(m)
-
-	parentClient := &cpClient{chatFn: func(ctx context.Context, call int) (core.Response, error) {
-		if call == 0 {
-			return toolCallResp("call-parent", subagent.SubAgentToolName, `{"agent_name":"worker","task":"level2"}`), nil
-		}
-		return finalResp("parent done"), nil
-	}}
-	parent := newCPAgent("parent", m, parentClient, subagent.NewSubAgentTool(stub))
-
-	if _, err := parent.ChatCtx(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// 等待两层子任务落定：Wait 收敛且无早期失败
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		failures := stub.Wait(context.Background(), []string{"child-1", "child-2"})
-		if len(failures) == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Wait 应收敛且无失败，得到 %v", failures)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }

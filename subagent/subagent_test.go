@@ -8,15 +8,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // ── fake Dispatcher（goharness 第 2 步 Dispatcher 实现的验收规格载体）──
 
-// fakeDispatcher 模拟宿主受理方：受理策略由 respond 注入，等待策略由 waitFn 注入。
+// fakeDispatcher 模拟宿主受理方：受理策略由 respond 注入。
 type fakeDispatcher struct {
 	respond func(req SubAgentRequest, n int) (SubAgentReceipt, error)
-	waitFn  func(ctx context.Context, sessionIDs []string) map[string]error
 
 	mu   sync.Mutex
 	reqs []SubAgentRequest
@@ -30,14 +28,7 @@ func (d *fakeDispatcher) Submit(ctx context.Context, req SubAgentRequest) (SubAg
 	if d.respond != nil {
 		return d.respond(req, n)
 	}
-	return SubAgentReceipt{Accepted: true, SessionID: fmt.Sprintf("session-%d", n)}, nil
-}
-
-func (d *fakeDispatcher) Wait(ctx context.Context, sessionIDs []string) map[string]error {
-	if d.waitFn != nil {
-		return d.waitFn(ctx, sessionIDs)
-	}
-	return map[string]error{}
+	return SubAgentReceipt{Accepted: true, TaskID: fmt.Sprintf("task-%d", n)}, nil
 }
 
 // acceptArgs 构造合法的派发参数。
@@ -53,7 +44,7 @@ func acceptArgs(agentName, task string) json.RawMessage {
 func TestSubAgentParallelSubmitNoCollapse(t *testing.T) {
 	var seq atomic.Int32
 	d := &fakeDispatcher{respond: func(req SubAgentRequest, n int) (SubAgentReceipt, error) {
-		return SubAgentReceipt{Accepted: true, SessionID: fmt.Sprintf("s-%d", seq.Add(1))}, nil
+		return SubAgentReceipt{Accepted: true, TaskID: fmt.Sprintf("t-%d", seq.Add(1))}, nil
 	}}
 	tool := NewSubAgentTool(d)
 
@@ -93,31 +84,6 @@ func TestSubAgentParallelSubmitNoCollapse(t *testing.T) {
 	}
 }
 
-// ── 等待中 Cancel（Promise.all 语义 + ctx 短路）──
-
-// TestSubAgentWaitCtxShortCircuit：Wait 阻塞等待期间父 ctx 取消，
-// 等待必须被短路返回（宿主实现等待原语的规格演示）。
-func TestSubAgentWaitCtxShortCircuit(t *testing.T) {
-	d := &fakeDispatcher{waitFn: func(ctx context.Context, sessionIDs []string) map[string]error {
-		<-ctx.Done()
-		return map[string]error{}
-	}}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan map[string]error, 1)
-	go func() { done <- d.Wait(ctx, []string{"s1", "s2"}) }()
-
-	// 确保已进入等待
-	time.Sleep(20 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("等待期间 ctx 取消应短路返回")
-	}
-}
-
 // ── 重复 Submit ──
 
 // TestSubAgentDuplicateSubmit：同一请求重复派发，工具层透明传递不报错、
@@ -125,7 +91,7 @@ func TestSubAgentWaitCtxShortCircuit(t *testing.T) {
 func TestSubAgentDuplicateSubmit(t *testing.T) {
 	var seq atomic.Int32
 	d := &fakeDispatcher{respond: func(req SubAgentRequest, n int) (SubAgentReceipt, error) {
-		return SubAgentReceipt{Accepted: true, SessionID: fmt.Sprintf("s-%d", seq.Add(1))}, nil
+		return SubAgentReceipt{Accepted: true, TaskID: fmt.Sprintf("t-%d", seq.Add(1))}, nil
 	}}
 	tool := NewSubAgentTool(d)
 

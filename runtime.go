@@ -75,6 +75,9 @@ type Runtime interface {
 	// Reason 返回终态原因：经 Fail 置为 Failed 时为宿主注明的失败原因；
 	// 其余终态路径（内核结算 / Cancel）返回空串。
 	Reason() string
+	// Result 返回任务结果：经 Complete 结算（宿主直结的 Pending 实例）时为宿主写入的结果；
+	// 内核接管的实例结果由会话承载，此处返回空串。
+	Result() string
 	// Cancel 取消实例：
 	//   - Pending 态等价 Fail(id, "cancelled")（内核尚未接管，直接进入启动前失败终态）；
 	//   - Running 态取消执行循环（循环以既有 ctx 取消路径收尾，最终落为 Cancelled）；
@@ -95,6 +98,7 @@ type runtimeEntry struct {
 	endedAt      time.Time
 	cancelFn     context.CancelFunc // 内核 run() 接管时注入；Cancel 据此取消执行循环
 	failedReason string             // Fail 置入的失败原因；其余路径为空
+	result       string             // Complete 置入的任务结果；仅宿主直结的 Pending 实例有值
 	done         chan struct{}      // 进入终态时 close（close-once）
 }
 
@@ -145,6 +149,13 @@ func (e *runtimeEntry) Reason() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.failedReason
+}
+
+// Result 返回 Complete 置入的任务结果；仅宿主直结的 Pending 实例有值，其余为空串。
+func (e *runtimeEntry) Result() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.result
 }
 
 // Cancel 取消实例（语义见 Runtime.Cancel）。幂等。
@@ -286,6 +297,26 @@ func (m *RuntimeManager) Fail(id, reason string) {
 	}
 	e.failedReason = reason
 	e.finishLocked(StatusFailed)
+}
+
+// Complete 将 Pending 实例结算为 Completed 并写入结果、关闭 Done，等待者经 Done() 唤醒。
+// 与 Fail 对称：仅对尚未被内核接管的实例生效（内核接管的实例由内核负责终态结算）；
+// 用于宿主自管任务循环的直结场景（如 SubAgent 任务在宿主 goroutine 中跑完后写入结果）。
+// 经 DefaultRuntimeManager() 统一访问。
+func (m *RuntimeManager) Complete(id, result string) {
+	m.mu.Lock()
+	e, ok := m.entries[id]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.status != StatusPending {
+		return
+	}
+	e.result = result
+	e.finishLocked(StatusCompleted)
 }
 
 // Unregister 移除终态实例（客户端/宿主的清理职责）；内核永不自动移除

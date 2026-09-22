@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"goagent"
-	"goagent/tools"
+	"github.com/DotNetAge/goagent"
+	"github.com/DotNetAge/goagent/tools"
 )
 
 func main() {
