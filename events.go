@@ -1,7 +1,9 @@
 package goagent
 
 import (
+	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DotNetAge/gochat/core"
@@ -11,34 +13,30 @@ import (
 type EventType string
 
 const (
-	// EvThinkingDelta 模型思考增量（流式）。
+	// EvThinkingDelta 模型思考增量（流式）。Data：string。
 	EvThinkingDelta EventType = "thinking_delta"
-	// EvContentDelta 模型回答文本增量（流式）。
+	// EvContentDelta 模型回答文本增量（流式）。Data：string。
 	EvContentDelta EventType = "content_delta"
-	// EvToolUseDelta 模型发起的工具调用参数增量（流式）。
+	// EvToolUseDelta 模型发起的工具调用参数增量（流式）。Data：gochat core.ToolCallDelta。
 	EvToolUseDelta EventType = "tool_use_delta"
-	// EvThinkingDone 思考阶段完成。
+	// EvThinkingDone 思考阶段完成（流式思考流结束）。Data：nil。
 	EvThinkingDone EventType = "thinking_done"
-	// EvLoopEnd 一轮完整的 Think-Act 循环结束（含迭代号和耗时）。
+	// EvLoopEnd 一轮完整的 Think-Act 循环结束。Data：*LoopEndData。
 	EvLoopEnd EventType = "loop_end"
-	// EvToolExecStart 工具开始执行。
+	// EvToolExecStart 工具开始执行。Data：*ToolExecStartData。
 	EvToolExecStart EventType = "tool_exec_start"
-	// EvToolExecEnd 工具执行完成。
+	// EvToolExecEnd 工具执行完成。Data：*ToolExecEndData。
 	EvToolExecEnd EventType = "tool_exec_end"
-	// EvFinalAnswer 思考循环产生最终答案。
+	// EvFinalAnswer 思考循环产生最终答案。Data：string（最终答案文本）。
 	EvFinalAnswer EventType = "final_answer"
-	// EvStop 思考循环终止，携带 StopReason。
+	// EvStop 思考循环终止。Data：StopReason（错误终止即 StopError，错误本身经 Chat 返回值传递）。
 	EvStop EventType = "stop"
-	// EvError 思考循环发生错误。
-	EvError EventType = "error"
 	// EvComplete 对话完成（无论成功、出错还是达到最大轮数），
-	// 携带完整的对话上下文（原始 Message 列表）。
+	// 携带完整的对话上下文。Data：[]gochat core.Message。
 	EvComplete EventType = "complete"
-	// EvSuspend 工具执行需要外部输入，循环挂起等待。
-	// Data 类型为 *ExternalInputRequest（见 suspend.go）。
+	// EvSuspend 工具执行需要外部输入，循环挂起等待。Data：*ExternalInputRequest（见 suspend.go）。
 	EvSuspend EventType = "suspend"
-	// EvTokenUsage 每次 LLM 调用完成后发射，携带该轮的 token 消耗。
-	// Data 类型为 *TokenUsageEvent。
+	// EvTokenUsage 每次 LLM 调用完成后发射，携带该轮的 token 消耗。Data：*TokenUsageEvent。
 	EvTokenUsage EventType = "token_usage"
 )
 
@@ -50,6 +48,34 @@ type TokenUsageEvent struct {
 	Usage *core.Usage
 	// Duration 本轮 LLM 调用耗时。
 	Duration time.Duration
+}
+
+// LoopEndData 是 EvLoopEnd 事件的数据载体。
+type LoopEndData struct {
+	// Iteration 结束的循环迭代号（0-based）。
+	Iteration int
+}
+
+// ToolExecStartData 是 EvToolExecStart 事件的数据载体。
+type ToolExecStartData struct {
+	// Name 被执行的工具名称。
+	Name string
+	// Args 模型生成的工具参数（json.RawMessage）。
+	Args json.RawMessage
+}
+
+// ToolExecEndData 是 EvToolExecEnd 事件的数据载体。
+type ToolExecEndData struct {
+	// Name 被执行的工具名称。
+	Name string
+	// Duration 工具执行耗时。
+	Duration time.Duration
+	// Success 是否执行成功。
+	Success bool
+	// Result 工具输出文本（成功时）。
+	Result string
+	// Error 执行错误（失败时非 nil）。
+	Error error
 }
 
 // Event 是事件总线中的一个事件。
@@ -73,12 +99,24 @@ type EventBus interface {
 
 // InProcessEventBus 是 EventBus 的默认实现：基于通道的进程内事件总线。
 //
-// 订阅者通道是无缓冲的——发布操作会阻塞直到所有订阅者接收完毕。
-// 这种设计让事件"同步可靠"，避免因慢消费者丢事件。
-// 如果需要更高性能，调用方应在订阅侧自行缓冲。
+// 并发模型（安全审计后定稿）：
+//   - 订阅者通道无缓冲，Emit 阻塞直到订阅者接收——事件"同步可靠"，不丢事件；
+//   - Emit 先快照订阅者列表并释放总线锁，再逐个投递：投递阻塞期间
+//     不持有任何总线锁，Subscribe/Cancel/Close 不被饿死（修复历史上的死锁）；
+//   - Cancel 只置位（墓碑），不关闭通道、不阻塞：与在途投递并发绝对安全；
+//   - 通道统一由 Close() 关闭——Close 必须由发送方生命周期收尾调用
+//     （如 execLoop 的 defer），此刻已无在途投递，不存在向已关闭通道发送。
+//   - 已取消的订阅者在投递时被跳过（事件静默丢弃）。
 type InProcessEventBus struct {
 	mu          sync.RWMutex
-	subscribers []chan Event
+	subscribers []*busSubscriber
+}
+
+// busSubscriber 是单个订阅者：数据通道与"已取消"标记分离，
+// 取消操作（置位）与投递操作（发送）因此无需互斥，永不阻塞、永不 panic。
+type busSubscriber struct {
+	ch     chan Event
+	closed atomic.Bool
 }
 
 // NewInProcessEventBus 创建默认进程内事件总线。
@@ -87,48 +125,65 @@ func NewInProcessEventBus() *InProcessEventBus {
 }
 
 // Emit 向所有订阅者发布事件。
+// 已取消的订阅者被跳过；通道无缓冲，投递会阻塞直到订阅者接收。
 func (b *InProcessEventBus) Emit(event Event) {
+	// 快照后立即释放锁：投递可能长时间阻塞（等待慢消费者），
+	// 期间必须允许其他 goroutine 订阅/取消/查询。
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for _, ch := range b.subscribers {
-		ch <- event
+	subs := make([]*busSubscriber, len(b.subscribers))
+	copy(subs, b.subscribers)
+	b.mu.RUnlock()
+
+	for _, s := range subs {
+		if s.closed.Load() {
+			continue // 已取消的订阅者不再投递
+		}
+		s.ch <- event
 	}
 }
 
-// Subscribe 订阅所有事件，返回只读通道和取消函数。
+// Subscribe 订阅所有事件，返回只读通道和取消函数。取消函数幂等，可安全重复调用。
+//
+// 取消语义：置位后该订阅者不再收到事件（在途投递除外）。通道不会被取消
+// 操作关闭——所有订阅者通道（含已取消的）统一在总线 Close() 时关闭，
+// 消费侧以通道关闭为终止信号。
 func (b *InProcessEventBus) Subscribe() (<-chan Event, func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	ch := make(chan Event)
-	b.subscribers = append(b.subscribers, ch)
+	s := &busSubscriber{ch: make(chan Event)}
+	b.subscribers = append(b.subscribers, s)
+	var once sync.Once
 	cancel := func() {
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		for i, c := range b.subscribers {
-			if c == ch {
-				b.subscribers = append(b.subscribers[:i], b.subscribers[i+1:]...)
-				break
-			}
-		}
-		close(ch)
+		// 只置位、不从列表移除：移除会让 Close 的快照丢失该订阅者，
+		// 导致其通道永远不被关闭、消费侧 range 永久挂起。
+		once.Do(func() { s.closed.Store(true) })
 	}
-	return ch, cancel
+	return s.ch, cancel
 }
 
-// Close 关闭事件总线，关闭所有订阅者通道。后续 Emit 变为空操作。
+// Close 关闭事件总线：关闭所有订阅者通道，后续 Emit 变为空操作。
+//
+// 安全前提：Close 必须在发送方（execLoop）结束投递之后调用
+// （defer bus.Close() 天然满足），否则可能与在途投递竞态。
 func (b *InProcessEventBus) Close() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, ch := range b.subscribers {
-		close(ch)
-	}
+	subs := b.subscribers
 	b.subscribers = nil
+	b.mu.Unlock()
+	for _, s := range subs {
+		s.closed.Store(true)
+		close(s.ch)
+	}
 }
 
 // NopEventBus 是空操作事件总线：所有 Emit 不做任何事，Subscribe 返回已关闭通道。
 // 当 Agent 未配置事件总线时，用它兜底避免 nil 调用。
 type NopEventBus struct{}
 
-func (NopEventBus) Emit(Event)                              {}
-func (NopEventBus) Subscribe() (<-chan Event, func())       { ch := make(chan Event); close(ch); return ch, func() {} }
-func (NopEventBus) Close()                                  {}
+func (NopEventBus) Emit(Event) {}
+func (NopEventBus) Subscribe() (<-chan Event, func()) {
+	ch := make(chan Event)
+	close(ch)
+	return ch, func() {}
+}
+func (NopEventBus) Close() {}

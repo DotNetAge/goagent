@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/DotNetAge/gochat/core"
@@ -22,18 +23,18 @@ import (
 // 组件而不影响循环骨架。
 type Agent struct {
 	cfg      Config
-	client   core.Client    // 注入的 LLM 客户端；nil 时由 run() 内按需创建
-	executor ToolExecutor   // 注入的工具执行器；nil 时用 DefaultToolExecutor
-	hooks    []LoopHook     // 循环钩子（无序；run 前按 Priority 排序）
-	bus      EventBus       // 事件总线；nil 时用 NopEventBus
+	client   core.Client  // 注入的 LLM 客户端；nil 时由 execLoop 的 resolveClient 按需创建
+	executor ToolExecutor // 注入的工具执行器；nil 时用 DefaultToolExecutor
+	hooks    []LoopHook   // 循环钩子（无序；run 前按 Priority 排序）
+	bus      EventBus     // 事件总线；nil 时用 NopEventBus
 
 	system  string
 	images  []string
 	history []core.Message
 
-	// _tools 是 Tools() 注册但还未进入 executor 的原始工具列表。
-	// run() 开始时一次性合入 DefaultToolExecutor。
-	_tools []ToolCall
+	// rawTools 是 Tools() 注册但还未进入 executor 的原始工具列表。
+	// run() 开始时一次性合入 DefaultToolExecutor（仅未注入自定义 ToolExecutor 时）。
+	rawTools []ToolCall
 
 	completeFn func([]core.Message) // 阻塞式对话完成回调（Complete 设置）
 
@@ -43,6 +44,32 @@ type Agent struct {
 
 	// lastStopReason 记录最近一次 run() 循环的停止原因，Chat()/ChatStream() 返回后可查询。
 	lastStopReason StopReason
+
+	// runtimeID 运行实例 ID：经 WithRuntimeID 指定（便于在 DefaultRuntimeManager
+	// 中定位与控制），或由内核自动生成。
+	runtimeID string
+
+	// taskID 任务归属：经 WithTaskID 显式指定（挂起恢复的多轮运行共享同一任务），
+	// 未指定时退化为"一次任务 = 一轮运行"，TaskID 等于本轮 runtimeID。
+	taskID string
+
+	// lastRuntimeID 最近一次运行实际使用的实例 ID（含自动生成场景），
+	// 供客户端运行后经 RuntimeID() 读取，再到 DefaultRuntimeManager 中定位。
+	// 单实例运行保护保证写入无并发竞争。
+	lastRuntimeID string
+
+	// manager 运行实例登记表：Ask 构造时默认绑定包内唯一的 defaultRuntimeManager，
+	// 所有运行统一进入控制平面（扁平架构：不存在"不登记的裸循环"旁路）。
+	// 仅包内测试经 withRuntimeManager 注入独立实例以隔离。
+	manager *RuntimeManager
+
+	// running 单实例单活跃运行保护：同一 Agent 实例并发 Chat 返回错误。
+	running atomic.Bool
+
+	// runtimeValues 宿主注入的生命周期上下文值（WithRuntimeValue，构造期写入）。
+	// execLoop 开始时整体注入 ctx，工具/钩子经 RuntimeValue[T].From(ctx) 取回；
+	// 运行期只读，无锁。
+	runtimeValues map[string]any
 }
 
 // LastStopReason 返回最近一次 run() 循环的停止原因。
@@ -52,11 +79,21 @@ func (a *Agent) LastStopReason() StopReason {
 	return a.lastStopReason
 }
 
-// Ask 开始一次新的对话，question 为首轮用户问题
+// RuntimeID 返回最近一次运行实际使用的实例 ID。
+// 未指定 WithRuntimeID 时由内核自动生成——运行结束后经此获取 ID，
+// 再到 DefaultRuntimeManager 中定位与控制本次运行；从未运行过时返回空串。
+func (a *Agent) RuntimeID() string {
+	return a.lastRuntimeID
+}
+
+// Ask 开始一次新的对话，question 为首轮用户问题。
+// 构造时默认绑定包内唯一的运行实例登记表：每次运行自动进入控制平面，
+// 客户端经 DefaultRuntimeManager() 统一查询与控制。
 func Ask(question string) *Agent {
 	return &Agent{
 		cfg:     defaultConfig(),
 		history: []core.Message{core.NewUserMessage(question)},
+		manager: defaultRuntimeManager,
 	}
 }
 
@@ -71,7 +108,7 @@ func (a *Agent) Config(opts ...Option) *Agent {
 // Tools 注册可供模型调用的工具（可链式调用）。
 // 当未注入自定义 ToolExecutor 时，run() 会把这些工具合入 DefaultToolExecutor。
 func (a *Agent) Tools(tools ...ToolCall) *Agent {
-	a._tools = append(a._tools, tools...)
+	a.rawTools = append(a.rawTools, tools...)
 	return a
 }
 
@@ -118,9 +155,106 @@ func (a *Agent) ChatStream(cb Callbacks) error {
 	return err
 }
 
-// run 多轮思考-工具执行主循环。
-// 内部通过闭包捕获 bus，保证所有事件发射走同一个 EventBus 实例。
+// ChatCtx 阻塞式执行完整的多轮思考-工具循环，返回最终答案。
+// 与 Chat() 的唯一差异：接受外部 ctx（超时/请求作用域取消）；
+// 运行中实例的外部控制统一走 DefaultRuntimeManager（Cancel）。
+// 调用方需结合 LastStopReason() 判断返回语义。
+func (a *Agent) ChatCtx(ctx context.Context) (string, error) {
+	return a.run(ctx, nil, false)
+}
+
+// ChatStreamCtx 流式执行，通过回调接收思考增量与各阶段事件。
+// 与 ChatStream() 的唯一差异：接受外部 ctx（超时/请求作用域取消）；
+// 运行中实例的外部控制统一走 DefaultRuntimeManager（Cancel）。
+func (a *Agent) ChatStreamCtx(ctx context.Context, cb Callbacks) error {
+	a.legacyCallbacks = cb
+	_, err := a.run(ctx, &cb, true)
+	return err
+}
+
+// run 一次运行的编排入口：单实例运行保护 + 控制平面状态机驱动 + 执行循环。
+// 所有运行统一进入控制平面（manager 由 Ask 默认绑定；零值构造兜底绑定为
+// 包内唯一 defaultRuntimeManager）——不存在不登记的裸循环旁路。
 func (a *Agent) run(ctx context.Context, cb *Callbacks, stream bool) (string, error) {
+	// 单实例单活跃运行：同一 Agent 实例并发 Chat 返回错误（控制平面 §4.5）
+	if !a.running.CompareAndSwap(false, true) {
+		return "", errors.New("goagent: 同一 Agent 实例不支持并发运行")
+	}
+	defer a.running.Store(false)
+
+	// 零值防御：绕过 Ask 构造的实例兜底绑定包内唯一登记表
+	if a.manager == nil {
+		a.manager = defaultRuntimeManager
+	}
+
+	// runCtx 是本轮执行循环的实际 ctx，
+	// 其 cancel 函数交给登记表条目持有，Cancel() 据此取消运行中的循环
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// 记录本轮实际使用的实例 ID（自动生成场景供客户端事后定位）；
+	// 任务归属未显式指定时退化为本轮 runtimeID（一次任务 = 一轮运行）
+	id := a.resolveRuntimeID()
+	a.lastRuntimeID = id
+	taskID := a.taskID
+	if taskID == "" {
+		taskID = id
+	}
+
+	entry, err := a.manager.acquire(id, taskID, cancel)
+	if err != nil {
+		a.lastStopReason = StopError
+		return "", err
+	}
+
+	ans, loopErr := a.execLoop(runCtx, cb, stream)
+
+	// 终态结算：内核是状态唯一写者，跃迁与既有 StopReason / ctx 取消一一对应
+	a.settleRuntime(entry, runCtx, loopErr)
+	return ans, loopErr
+}
+
+// resolveRuntimeID 返回本轮运行的实例 ID：优先用 WithRuntimeID 指定的；未指定则自动生成。
+func (a *Agent) resolveRuntimeID() string {
+	if a.runtimeID != "" {
+		return a.runtimeID
+	}
+	return newRuntimeID()
+}
+
+// settleRuntime 结算本轮运行的终态（内核唯一写者）。分类规则与既有
+// StopReason / ctx 取消一一对应（控制平面 §4.2）：
+//   - runCtx 已取消（外部 ctx 取消或 Cancel()）→ Cancelled
+//   - 错误 / 轮数耗尽 → Failed
+//   - 正常结束（StopFinished / StopSuspended / 钩子中止）→ Completed
+//
+// Think Loop 没有中间态：挂起返回（StopSuspended）即本轮循环正常结束，
+// "等待外部输入、稍后恢复"是宿主编排——宿主经 EvSuspend / LastStopReason 感知，
+// 补齐输入后以新 runtimeID 对同一会话再次发起运行。
+func (a *Agent) settleRuntime(entry *runtimeEntry, runCtx context.Context, loopErr error) {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.status.isTerminal() {
+		// 宿主已抢先结算（如 Pending 态被 Cancel），保留该结果
+		return
+	}
+	switch {
+	case runCtx.Err() != nil:
+		entry.finishLocked(StatusCancelled)
+	case loopErr != nil || a.lastStopReason == StopError || a.lastStopReason == StopMaxIterations:
+		entry.finishLocked(StatusFailed)
+	default:
+		entry.finishLocked(StatusCompleted)
+	}
+}
+
+// execLoop 多轮思考-工具执行主循环。
+// 内部通过闭包捕获 bus，保证所有事件发射走同一个 EventBus 实例。
+func (a *Agent) execLoop(ctx context.Context, cb *Callbacks, stream bool) (string, error) {
+	// 0. 注入宿主的运行时上下文值：工具、钩子、LLM 客户端全链路可经
+	// RuntimeValue[T].From(ctx) 取回（构造期写入，此处之后只读）
+	ctx = withRuntimeValues(ctx, a.runtimeValues)
+
 	// 1. 合成依赖（懒创建 + 一次性合入工具）
 	client, err := a.resolveClient()
 	if err != nil {
@@ -129,7 +263,7 @@ func (a *Agent) run(ctx context.Context, cb *Callbacks, stream bool) (string, er
 	}
 	executor := a.resolveExecutor()
 	bus := a.resolveBus()
-	defer bus.Close() // P0-1: 确保 EventBus 生命周期被管理，所有返回路径都会触发 Close
+	defer bus.Close() // 统一由发送方收尾关闭：所有返回路径都会触发，关闭时已无在途投递
 
 	hooks := sortHooks(a.hooks)
 
@@ -212,11 +346,11 @@ loop:
 		// ── AfterLLM hooks（带精确 finishReason）──
 		{
 			input := AfterLLMInput{
-				Iteration:      i,
+				Iteration:       i,
 				ResponseContent: msg.TextContent(),
-				Reasoning:      msg.ReasoningContent,
-				FinishReason:   finishReason,
-				ToolCalls:      msg.ToolCalls,
+				Reasoning:       msg.ReasoningContent,
+				FinishReason:    finishReason,
+				ToolCalls:       msg.ToolCalls,
 			}
 			for _, h := range hooks {
 				result := h.AfterLLM(ctx, input)
@@ -228,9 +362,6 @@ loop:
 					}
 					break loop
 				}
-			}
-			if loopErr != nil || lastAbortReason != "" {
-				break loop
 			}
 		}
 
@@ -255,7 +386,7 @@ loop:
 				args = json.RawMessage(call.Arguments)
 			}
 
-			bus.Emit(Event{Type: EvToolExecStart, Data: &toolExecData{Name: call.Name, Args: args}})
+			bus.Emit(Event{Type: EvToolExecStart, Data: &ToolExecStartData{Name: call.Name, Args: args}})
 			if cb != nil && cb.BeforeToolExec != nil && tool != nil {
 				cb.BeforeToolExec(tool, args)
 			}
@@ -273,14 +404,14 @@ loop:
 					emitStop(StopSuspended)
 					return "", nil
 				}
-				// 理论上 errors.Is 命中则 errors.As 必成功，这里兜底跳过
-				continue
+				// 包装错误只携带哨兵不携带请求体：按普通失败处理，
+				// 保证 tool_calls 消息有配对的 tool 结果，协议完整
 			}
 
 			success := execErr == nil
 			duration := time.Since(start)
 
-			bus.Emit(Event{Type: EvToolExecEnd, Data: &toolExecEndData{
+			bus.Emit(Event{Type: EvToolExecEnd, Data: &ToolExecEndData{
 				Name:     call.Name,
 				Duration: duration,
 				Success:  success,
@@ -415,8 +546,8 @@ func (a *Agent) resolveExecutor() ToolExecutor {
 	if a.executor != nil {
 		return a.executor
 	}
-	exec := NewDefaultToolExecutor(a._tools...)
-	a._tools = nil // 已合入，清空
+	exec := NewDefaultToolExecutor(a.rawTools...)
+	a.rawTools = nil // 已合入，清空
 	return exec
 }
 
@@ -436,7 +567,7 @@ func (a *Agent) collectTools(exec ToolExecutor) []core.Tool {
 	if enumerator, ok := exec.(ToolEnumerator); ok {
 		toolCalls = enumerator.Tools()
 	} else {
-		toolCalls = a._tools
+		toolCalls = a.rawTools
 	}
 	out := make([]core.Tool, 0, len(toolCalls))
 	for _, t := range toolCalls {
@@ -534,24 +665,4 @@ func (a *Agent) thinkFn(cb *Callbacks) func(string) {
 		return nil
 	}
 	return cb.ThinkCallback
-}
-
-// ── 内部数据结构（事件载体）──
-
-// LoopEndData 是 EvLoopEnd 事件的数据载体。
-type LoopEndData struct {
-	Iteration int
-}
-
-type toolExecData struct {
-	Name string
-	Args json.RawMessage
-}
-
-type toolExecEndData struct {
-	Name     string
-	Duration time.Duration
-	Success  bool
-	Result   string
-	Error    error
 }

@@ -106,3 +106,35 @@ func WithLoopHooks(hooks ...LoopHook) Option {
 func WithEventBus(bus EventBus) Option {
 	return func(a *Agent) { a.bus = bus }
 }
+
+// WithRuntimeID 指定本次运行的实例 ID，便于经 DefaultRuntimeManager 定位与控制。
+// 未指定时内核自动生成全局唯一 ID（运行后经 Agent.RuntimeID() 取回）。
+func WithRuntimeID(id string) Option {
+	return func(a *Agent) { a.runtimeID = id }
+}
+
+// WithTaskID 指定任务归属：一次任务跨多轮运行（挂起恢复、宿主编排续跑）时，
+// 各轮运行共享同一 TaskID，客户端经 DefaultRuntimeManager().GetByTask(taskID)
+// 统一定位"我的任务现在怎么样了"。
+// 未指定时退化为"一次任务 = 一轮运行"，TaskID 等于本轮 runtimeID——普通调用方无感知。
+func WithTaskID(taskID string) Option {
+	return func(a *Agent) { a.taskID = taskID }
+}
+
+// WithRuntimeValue 向 Agent 运行时注入生命周期上下文值（构造期写入，运行期只读）。
+// 工具与循环钩子经 RuntimeValue[T].From(ctx) 取回——详见 RuntimeValue 类型文档。
+// 同名槽重复注入时后注入覆盖先注入。
+func WithRuntimeValue[T any](v RuntimeValue[T], value T) Option {
+	return func(a *Agent) {
+		if a.runtimeValues == nil {
+			a.runtimeValues = make(map[string]any)
+		}
+		a.runtimeValues[v.name] = value
+	}
+}
+
+// withRuntimeManager 注入独立登记表——仅供包内测试隔离使用（生产代码的
+// 所有运行统一进入包内唯一的 defaultRuntimeManager，外部禁止注入或创建）。
+func withRuntimeManager(m *RuntimeManager) Option {
+	return func(a *Agent) { a.manager = m }
+}

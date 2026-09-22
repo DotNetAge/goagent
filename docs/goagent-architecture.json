@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "goagent — 可嵌入的 ReAct 循环引擎",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1240, 680],
+    "repository": {
+      "url": "https://github.com/DotNetAge/goagent.git",
+      "revision": "c524379d0d7e685909606687f4baafb456cd0ba8"
+    }
+  },
+  "components": [
+    { "id": "cli", "type": "frontend", "label": "goagent CLI", "sublabel": "cmd/goagent/main.go", "sources": [{ "path": "cmd/goagent/main.go" }], "pos": [520, 60], "size": [220, 64] },
+    { "id": "agent", "type": "backend", "label": "Agent.run()", "sublabel": "ReAct 循环引擎 · agent.go", "sources": [{ "path": "agent.go" }], "pos": [460, 190], "size": [340, 84] },
+    { "id": "llmclient", "type": "backend", "label": "core.Client", "sublabel": "LLM 抽象接口 · gochat/core", "sources": [{ "path": "llm.go" }], "pos": [130, 350], "size": [200, 64] },
+    { "id": "executor", "type": "backend", "label": "ToolExecutor", "sublabel": "DefaultToolExecutor · tools/bash.go", "sources": [{ "path": "executor.go" }, { "path": "tools/bash.go" }], "pos": [390, 350], "size": [200, 64] },
+    { "id": "hooks", "type": "backend", "label": "LoopHook", "sublabel": "BeforeLLM / AfterLLM / Abort", "sources": [{ "path": "hooks.go" }], "pos": [650, 350], "size": [200, 64] },
+    { "id": "eventbus", "type": "messagebus", "label": "EventBus", "sublabel": "12 种事件 · events.go", "sources": [{ "path": "events.go" }], "pos": [910, 350], "size": [200, 64] },
+    { "id": "llm", "type": "external", "label": "LLM Provider", "sublabel": "本机 Ollama :11434 / OpenAI 兼容", "pos": [130, 520], "size": [200, 64] },
+    { "id": "goharness", "type": "external", "label": "goharness 宿主", "sublabel": "上层产品 · 只实现接口注入", "pos": [560, 520], "size": [260, 64] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "goagent 核心包 · 只向内依赖", "wraps": ["agent", "llmclient", "executor", "hooks", "eventbus"] }
+  ],
+  "connections": [
+    { "id": "cli-agent", "from": "cli", "to": "agent", "label": "Ask().Tools().Chat()", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelAt": [630, 138] },
+    { "id": "agent-llmclient", "from": "agent", "to": "llmclient", "label": "Chat / ChatStream" },
+    { "id": "agent-executor", "from": "agent", "to": "executor", "label": "Execute(name, args)", "fromSide": "bottom", "toSide": "top" },
+    { "id": "agent-hooks", "from": "agent", "to": "hooks", "label": "BeforeLLM / AfterLLM", "fromSide": "bottom", "toSide": "top" },
+    { "id": "agent-eventbus", "from": "agent", "to": "eventbus", "label": "Emit(Event)" },
+    { "id": "llmclient-llm", "from": "llmclient", "to": "llm", "label": "HTTP · minicpm-v4.6", "fromSide": "bottom", "toSide": "top", "labelAt": [230, 467] },
+    { "id": "goharness-llmclient", "from": "goharness", "to": "llmclient", "label": "WithLLMClient · RetryingClient", "variant": "dashed" },
+    { "id": "goharness-executor", "from": "goharness", "to": "executor", "label": "SandboxedExecutor", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "goharness-hooks", "from": "goharness", "to": "hooks", "label": "RAG / 收敛 / 预算 Hook", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "goharness-eventbus", "from": "goharness", "to": "eventbus", "label": "WebSocket 广播", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "只向内依赖",
+      "items": [
+        "Agent 只依赖 4 个抽象接口：core.Client / ToolExecutor / LoopHook / EventBus",
+        "gochat 具体客户端仅在 llm.go 默认工厂导入，循环骨架不感知 Provider",
+        "宿主通过 With* 选项注入实现，不修改循环骨架"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "挂起续跑（对话式 Agent）",
+      "items": [
+        "工具返回 ErrNeedExternalInput 哨兵错误即挂起循环",
+        "EvSuspend 携带 ExternalInputRequest（permission / ask_user）",
+        "外部补 role=tool 消息到 History 后再次 Chat() 即恢复"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "可观测",
+      "items": [
+        "EventBus 是唯一事件输出通道，覆盖 token 增量到对话生命周期",
+        "EvTokenUsage 每轮上报 token 消耗与耗时",
+        "默认 InProcessEventBus，可替换为 WebSocket 广播"
+      ]
+    }
+  ]
+}

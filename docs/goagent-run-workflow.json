@@ -1,0 +1,72 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Agent.run() — ReAct 循环工作流",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "prep", "label": "① 初始化" },
+    { "id": "react", "label": "② ReAct 循环 · for i < MaxIterations" },
+    { "id": "tool", "label": "③ 工具执行" },
+    { "id": "exit", "label": "④ 收尾与终止" }
+  ],
+  "phases": [
+    { "id": "setup", "label": "准备", "fromCol": 0, "toCol": 1 },
+    { "id": "iterate", "label": "Think-Act 迭代", "fromCol": 2, "toCol": 4, "variant": "emphasis" },
+    { "id": "terminate", "label": "终止", "fromCol": 5, "toCol": 5 }
+  ],
+  "groups": [
+    { "id": "loop", "label": "每轮迭代", "lane": "react", "fromCol": 2, "toCol": 4, "variant": "emphasis" },
+    { "id": "toolbatch", "label": "逐个执行 tool_calls", "lane": "tool", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["chat", "resolve", "hooksbefore", "round", "afterhooks", "final"],
+  "nodes": [
+    { "id": "chat", "lane": "prep", "col": 0, "type": "frontend", "label": "Chat() / ChatStream()", "sublabel": "阻塞 / 流式入口", "width": 142 },
+    { "id": "resolve", "lane": "prep", "col": 1, "type": "backend", "label": "初始化依赖与消息", "sublabel": "resolve · build · tools", "width": 142 },
+    { "id": "hooksbefore", "lane": "react", "col": 2, "type": "backend", "label": "BeforeLLM hooks", "sublabel": "Priority 升序 · 可中止", "width": 142 },
+    { "id": "round", "lane": "react", "col": 3, "type": "backend", "label": "round() 调用 LLM", "sublabel": "Chat / Stream · EvTokenUsage", "width": 142 },
+    { "id": "afterhooks", "lane": "react", "col": 4, "type": "backend", "label": "AfterLLM hooks", "sublabel": "精确 finishReason · 可中止", "width": 142 },
+    { "id": "final", "lane": "react", "col": 5, "type": "backend", "label": "返回最终答案", "sublabel": "StopFinished · EvFinalAnswer", "width": 142 },
+    { "id": "toolexec", "lane": "tool", "col": 5, "type": "backend", "label": "executor.Execute()", "sublabel": "EvToolExecStart / End", "width": 142 },
+    { "id": "suspend", "lane": "tool", "col": 4, "type": "security", "label": "挂起 StopSuspended", "sublabel": "ErrNeedExternalInput", "width": 142 },
+    { "id": "teardown", "lane": "exit", "col": 3, "type": "backend", "label": "循环收尾", "sublabel": "emitComplete · Abort LIFO", "width": 142 },
+    { "id": "stopmax", "lane": "exit", "col": 4, "type": "external", "label": "StopMaxIterations", "sublabel": "轮数耗尽 · 返回 error", "width": 142 },
+    { "id": "stoperror", "lane": "exit", "col": 5, "type": "external", "label": "StopError", "sublabel": "LLM 错误 / ctx / hook Error", "width": 142 }
+  ],
+  "edges": [
+    { "id": "chat-resolve", "from": "chat", "to": "resolve", "role": "main" },
+    { "id": "resolve-loop", "from": "resolve", "to": "hooksbefore", "label": "进入循环", "role": "main" },
+    { "id": "hooks-round", "from": "hooksbefore", "to": "round", "label": "hooks 通过", "role": "main" },
+    { "id": "round-after", "from": "round", "to": "afterhooks", "label": "EvTokenUsage", "role": "main" },
+    { "id": "after-final", "from": "afterhooks", "to": "final", "label": "ToolCalls 为空 · EvFinalAnswer", "role": "main", "variant": "emphasis" },
+    { "id": "after-tool", "from": "afterhooks", "to": "toolexec", "label": "有 ToolCalls · StopToolLoop", "role": "branch" },
+    { "id": "tool-suspend", "from": "toolexec", "to": "suspend", "label": "ErrNeedExternalInput · EvSuspend", "role": "error" },
+    { "id": "tool-loopback", "from": "toolexec", "to": "hooksbefore", "label": "tool 结果回传 · EvLoopEnd · 下一轮", "role": "return" },
+    { "id": "hooks-teardown", "from": "hooksbefore", "to": "teardown", "label": "hook 中止 / 轮数耗尽", "role": "error" },
+    { "id": "round-teardown", "from": "round", "to": "teardown", "label": "LLM 错误 / ctx 取消", "role": "error" },
+    { "id": "teardown-max", "from": "teardown", "to": "stopmax", "label": "默认分支", "role": "error" },
+    { "id": "teardown-err", "from": "teardown", "to": "stoperror", "label": "loopErr", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "循环不变量",
+      "items": [
+        "钩子与事件只扩展循环，永不从骨架分支出产品特有路径",
+        "工具错误不终止循环——作为 role=tool 结果回传，模型自行修正",
+        "精确 finishReason 来自 Provider，不靠 ToolCalls 有无推断"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "挂起与终止",
+      "items": [
+        "挂起：ErrNeedExternalInput → EvSuspend，补 role=tool 后再 Chat() 恢复，不走 hooks.Abort",
+        "hook Abort=true → StopFinished；loopErr → StopError；轮数耗尽 → StopMaxIterations",
+        "所有 hooks.Abort 按 Priority 相反顺序（LIFO）执行"
+      ]
+    }
+  ]
+}

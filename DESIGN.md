@@ -317,8 +317,8 @@ func (b *WebSocketEventBus) Close() { /* 关闭 websocket */ }
 | 事件 | 触发条件 | Data 类型 |
 |------|----------|----------|
 | `EvTokenUsage` | LLM 调用完成后立即 | `*TokenUsageEvent{Iteration, Usage, Duration}` |
-| `EvToolExecStart` | 工具开始执行 | `*toolExecData{Name, Args}` |
-| `EvToolExecEnd` | 工具执行完成（含挂起情况不发此事件） | `*toolExecEndData{Name, Duration, Success, Result, Error}` |
+| `EvToolExecStart` | 工具开始执行 | `*ToolExecStartData{Name, Args}` |
+| `EvToolExecEnd` | 工具执行完成（含挂起情况不发此事件） | `*ToolExecEndData{Name, Duration, Success, Result, Error}` |
 | `EvLoopEnd` | 一轮 Think-Act 循环结束（工具结果全部回传） | `*LoopEndData{Iteration}` |
 
 ### 循环终止阶段
@@ -427,7 +427,7 @@ func (m *mockLLMClient) ChatStream(...) (*core.Stream, error) { ... }
 | RAG | | ✅（MemoryThoughtHook 实现） |
 | 沙箱安全门控 | | ✅（SandboxedExecutor 实现） |
 | LLM 错误恢复策略 | | ✅（RetryingClient 实现） |
-| 多 Agent 协作 | | ✅（SubAgent/Team 在 goharness 编排） |
+| 多 Agent 协作 | ✅（协议与工具在独立子包 `goagent/subagent`：SubAgentRequest / SubAgentDispatcher 接口 / SubAgent 工具，内核零感知；Runtime / RuntimeManager 控制平面） | 实现 Dispatcher 受理与策略（会话复用、级联取消、并发上限），创建权在宿主 |
 
 ## 九、演进规划
 
@@ -446,7 +446,12 @@ goagent 当前已实现的核心机制：
 
 - ⏭️ **并发工具执行**：ToolExecutor.Execute 可扩展为按工具声明并发/串行，goagent 循环按批执行
 - ⏭️ **Plan-and-Solve 模式**：可选"规划 → 执行"双阶段，让 Agent 先出计划再执行
-- ⏭️ **SubAgent 原生支持**：Agent 循环内可派生子会话，子会话消息自动冒泡回主会话
 - ⏭️ **结构化输出强制**：支持要求 LLM 返回特定 JSON schema（用 `response_format` 约束）
+
+已落地的多 Agent 协作机制（创建权上收宿主，Runtime 不自我派生）：
+
+- ✅ **控制平面（内部化）**：`Runtime` 控制视图 + `RuntimeManager` 登记表（`runtime.go`）。运行状态的唯一真相源是内核循环：Pending / Running / Completed / Failed / Cancelled 由 `run()` 结算（Think Loop 无中间态）。概念分层：TaskID（任务，稳定）→ 多轮 Runtime（每轮运行实例），客户端经 `GetByTask` 用任务词汇定位；登记表只有包内唯一的 `DefaultRuntimeManager()` 实例，所有 `Ask`/`Chat` 运行自动登记（无裸循环旁路），客户端统一经它查询与控制；`ChatCtx` / `ChatStreamCtx` 提供超时/请求作用域取消
+- ✅ **运行时上下文注入**（`runtimevalue.go`）：`RuntimeValue[T]` 类型安全槽位 + `WithRuntimeValue`。宿主构造期注入生命周期上下文（会话/沙箱/身份），execLoop 开始时整体派生注入 ctx，工具/钩子/LLM 客户端经 `From(ctx)` 取回；工具与钩子接口签名零变更，构造期写入运行期只读（无锁）
+- ✅ **SubAgent 协议与工具**（独立子包 `goagent/subagent`，非内核组件）：`SubAgentRequest` / `SubAgentReceipt` / `SubAgentDispatcher` 接口 + `SubAgent` 工具。内核根包对 SubAgent 零感知（工具与普通工具同路径执行，无父子等级）；工具只做"发请求、同步等回执"，宿主实现 Dispatcher 受理并创建新的 Runtime 实例；不派生 goroutine、不冒泡消息——父子之间只剩宿主解释的元数据
 
 这些都是 goagent 循环骨架自然扩展的方向——**不修改骨架本身，只在骨架上装配新的行为模式**。
