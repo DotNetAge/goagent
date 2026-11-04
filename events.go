@@ -34,6 +34,12 @@ const (
 	// EvComplete 对话完成（无论成功、出错还是达到最大轮数），
 	// 携带完整的对话上下文。Data：[]gochat core.Message。
 	EvComplete EventType = "complete"
+	// EvMessagesSnapshot 迭代边界消息快照：每轮 Think-Act 循环结束与挂起前
+	// 发射，Data 为完整对话上下文的浅拷贝（[]gochat core.Message）。供宿主
+	// 把会话回写挂到迭代边界——工具（如 SubAgent 派发）产出的消息即时落盘，
+	// 挂死轮 + 宿主重启不再蒸发整轮记录。EvComplete 仍只在最终返回时触发
+	// 一次，二者不互相替代。
+	EvMessagesSnapshot EventType = "messages_snapshot"
 	// EvSuspend 工具执行需要外部输入，循环挂起等待。Data：*ExternalInputRequest（见 suspend.go）。
 	EvSuspend EventType = "suspend"
 	// EvTokenUsage 每次 LLM 调用完成后发射，携带该轮的 token 消耗。Data：*TokenUsageEvent。

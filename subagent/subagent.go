@@ -32,7 +32,14 @@ type SubAgentReceipt struct {
 	// Accepted 是否受理。
 	Accepted bool
 	// TaskID 受理后的任务跟踪句柄（CollectResults 据此收集）。
+	// 仅作轮内临时句柄：随进程死亡，不进上下文长期记忆。
 	TaskID string
+	// SessionID 受理落定的子代理会话 ID（长期锚点：落盘持久化，跨重启、
+	// 跨端可见）。LLM 上下文只需保存它即可在后续轮次复用/直达该子代理对话。
+	SessionID string
+	// Title 受理即时的会话标题（任务文本截断快照，不拖受理）；宿主注入
+	// titleFn 时后台提炼更准确的标题并经 SubtaskTitleUpdated 事件刷新。
+	Title string
 	// Reason 拒绝原因（Accepted=false 时）。
 	Reason string
 }

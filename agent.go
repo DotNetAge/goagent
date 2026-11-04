@@ -79,6 +79,15 @@ func (a *Agent) LastStopReason() StopReason {
 	return a.lastStopReason
 }
 
+// snapshotMessages 返回消息切片的浅拷贝（EvMessagesSnapshot 快照事件用）：
+// 外层切片独立——内核后续 append 不影响快照；消息内的块切片在写入后不再
+// 被内核修改，宿主异步消费安全。
+func snapshotMessages(messages []core.Message) []core.Message {
+	out := make([]core.Message, len(messages))
+	copy(out, messages)
+	return out
+}
+
 // RuntimeID 返回最近一次运行实际使用的实例 ID。
 // 未指定 WithRuntimeID 时由内核自动生成——运行结束后经此获取 ID，
 // 再到 DefaultRuntimeManager 中定位与控制本次运行；从未运行过时返回空串。
@@ -399,6 +408,7 @@ loop:
 				var req *ExternalInputRequest
 				if errors.As(execErr, &req) {
 					req.ToolCallID = call.ID // 若工具未设置 ToolCallID，从 call 回填
+					bus.Emit(Event{Type: EvMessagesSnapshot, Data: snapshotMessages(messages)})
 					bus.Emit(Event{Type: EvSuspend, Data: req})
 					emitComplete(messages)
 					emitStop(StopSuspended)
@@ -436,6 +446,10 @@ loop:
 
 		// ── 一轮 Think-Act 循环结束 ──
 		bus.Emit(Event{Type: EvLoopEnd, Data: &LoopEndData{Iteration: i}})
+		// 迭代边界消息快照：宿主回写挂迭代边界（挂死轮 + 宿主重启不再蒸发
+		// 已产出的消息，如 SubAgent 派发回执）。快照是拷贝，宿主消费期间
+		// 内核继续追加消息互不干扰。
+		bus.Emit(Event{Type: EvMessagesSnapshot, Data: snapshotMessages(messages)})
 	}
 
 	// 循环结束收尾：触发所有钩子的 Abort（LIFO），按实际结束原因分类返回
