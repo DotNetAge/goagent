@@ -4,4 +4,4 @@ go 1.25
 
 toolchain go1.26.11
 
-require github.com/DotNetAge/gochat v0.2.15
+require github.com/DotNetAge/gochat v0.2.16
