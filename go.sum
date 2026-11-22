@@ -4,6 +4,8 @@ github.com/DotNetAge/gochat v0.2.15 h1:12bUwhLP8imu5x0H16OXKquuQkjbm3fLeavJgzPv3
 github.com/DotNetAge/gochat v0.2.15/go.mod h1:Sg+RpD3wq1b6/lEONInN7vrly31Z3C65rpNcUoljlvY=
 github.com/DotNetAge/gochat v0.2.16 h1:Pfxj2BYogZ6ebRMJUN/Zwl/wKSivr+ddlrBAY2crpz4=
 github.com/DotNetAge/gochat v0.2.16/go.mod h1:Sg+RpD3wq1b6/lEONInN7vrly31Z3C65rpNcUoljlvY=
+github.com/DotNetAge/gochat v0.2.18 h1:GbJs4MrZlrek1DtV8U61M9Ciux1BRpI3hDm/Zq/keLk=
+github.com/DotNetAge/gochat v0.2.18/go.mod h1:Sg+RpD3wq1b6/lEONInN7vrly31Z3C65rpNcUoljlvY=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
