@@ -221,13 +221,13 @@ type LoopHook interface {
 **示例**：
 
 ```go
-// MemoryThoughtHook — RAG 检索钩子（goharness 实际场景）
-type MemoryThoughtHook struct {
+// SystemPromptSectionHook — RAG 检索钩子（goharness 实际场景）
+type SystemPromptSectionHook struct {
     rag *rag.Retriever
 }
 
-func (h *MemoryThoughtHook) Priority() int { return 20 }
-func (h *MemoryThoughtHook) BeforeLLM(ctx context.Context, in BeforeLLMInput) HookResult {
+func (h *SystemPromptSectionHook) Priority() int { return 20 }
+func (h *SystemPromptSectionHook) BeforeLLM(ctx context.Context, in BeforeLLMInput) HookResult {
     // 用最近一条 user 消息做 query，检索相关记忆
     var lastUser string
     for i := len(in.Messages) - 1; i >= 0; i-- {
@@ -244,10 +244,10 @@ func (h *MemoryThoughtHook) BeforeLLM(ctx context.Context, in BeforeLLMInput) Ho
     // 实际实现中应返回新的消息序列或注入到已有 system 消息的文本里
     return HookResult{}
 }
-func (h *MemoryThoughtHook) AfterLLM(ctx context.Context, in AfterLLMInput) HookResult {
+func (h *SystemPromptSectionHook) AfterLLM(ctx context.Context, in AfterLLMInput) HookResult {
     return HookResult{}
 }
-func (h *MemoryThoughtHook) Abort(ctx context.Context, reason string) {}
+func (h *SystemPromptSectionHook) Abort(ctx context.Context, reason string) {}
 ```
 
 **注册**：
@@ -255,7 +255,7 @@ func (h *MemoryThoughtHook) Abort(ctx context.Context, reason string) {}
 goagent.Ask("...").
     Config(
         goagent.WithLoopHooks(
-            &MemoryThoughtHook{rag: retriever},
+            &SystemPromptSectionHook{rag: retriever},
             &ConvergenceHook{retryLimit: 3},
         ),
     ).
@@ -342,7 +342,7 @@ goharness 是 goagent 的上层产品外壳。接入的核心思路：**不继�
 |---------------|---------------|----------|
 | `core.Client` | 带 LLMRetry + isToolPairingError 修复的包装 | `WithLLMClient` |
 | `ToolExecutor` | 带 sandbox 检查的执行器 | `WithToolExecutor` |
-| `LoopHook[0]` | MemoryThoughtHook（RAG 注入） | `WithLoopHooks` |
+| `LoopHook[0]` | SystemPromptSectionHook（RAG 注入） | `WithLoopHooks` |
 | `LoopHook[1]` | ConvergenceHook（重复错误收敛） | `WithLoopHooks` |
 | `LoopHook[2]` | TokenBudgetHook（预算检查） | `WithLoopHooks` |
 | `EventBus` | WebSocket 广播实现 | `WithEventBus` |
@@ -380,7 +380,7 @@ goagent 不做会话管理——它只消费 `History(messages)` 并在 `Complet
 
 1. 持久化 `Complete` 回调返回的 `[]core.Message`
 2. 上下文压缩（压缩后的摘要作为 System 消息或独立消息注入）
-3. RAG 检索作为 `MemoryThoughtHook.BeforeLLM` 的实现
+3. RAG 检索作为 `SystemPromptSectionHook.BeforeLLM` 的实现
 4. 滑动窗口和 token 预算
 
 ## 六、测试策略
@@ -424,7 +424,7 @@ func (m *mockLLMClient) ChatStream(...) (*core.Stream, error) { ... }
 | ToolCall 接口 | ✅ | 实现具体工具 |
 | 会话管理 | | ✅（持久化、滑动窗口） |
 | 上下文压缩 | | ✅（压缩后注入为 System） |
-| RAG | | ✅（MemoryThoughtHook 实现） |
+| RAG | | ✅（SystemPromptSectionHook 实现） |
 | 沙箱安全门控 | | ✅（SandboxedExecutor 实现） |
 | LLM 错误恢复策略 | | ✅（RetryingClient 实现） |
 | 多 Agent 协作 | ✅（协议与工具在独立子包 `goagent/subagent`：SubAgentRequest / SubAgentDispatcher 接口 / SubAgent 工具，内核零感知；Runtime / RuntimeManager 控制平面） | 实现 Dispatcher 受理与策略（会话复用、级联取消、并发上限），创建权在宿主 |
