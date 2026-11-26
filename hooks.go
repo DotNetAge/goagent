@@ -14,6 +14,10 @@ type HookResult struct {
 	AbortReason string
 	// Error 非 nil 时，循环以错误终止。
 	Error error
+	// AppendMessages 由钩子追加到本轮对话的尾部（追加后立即参与后续迭代与
+	// 最终快照，因此会随回写落盘）。用于宿主兜底注入：任务板提醒、工具产出的
+	// 视觉附件等。追加位置在尾部，不改变已有前缀，KV 缓存前缀保持有效。
+	AppendMessages []core.Message
 }
 
 // IsTerminal 判断钩子是否请求终止循环。

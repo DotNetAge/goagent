@@ -333,6 +333,12 @@ loop:
 					}
 					break loop
 				}
+				// 钩子追加的兜底消息（任务板提醒 / 视觉附件）追加到尾部：
+				// 本轮请求立即带上，后续迭代与最终快照继续保留，回写自然落盘。
+				if len(result.AppendMessages) > 0 {
+					messages = append(messages, result.AppendMessages...)
+					input.Messages = messages
+				}
 			}
 		}
 
